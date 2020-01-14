@@ -1,0 +1,543 @@
+---
+title: 'IS 6489: Ames Housing Prices Kaggle Comp'
+author: "Meag Tessmann"
+date: "12/8/2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Summary
+
+
+Kaggle describes this <a href="https://www.kaggle.com/c/house-prices-advanced-regression-techniques" target="new">competition</a> as: 
+Ask a home buyer to describe their dream house, and they probably won’t begin with the height of the basement ceiling or the proximity to an east-west railroad. But this playground competition’s dataset proves that much more influences price negotiations than the number of bedrooms or a white-picket fence.
+
+# Libraries & Data
+
+``` {R install-libraries}
+
+library(skimr) #better data overview
+library(scales) #moneys labels
+library(plyr) #data manipulation
+library(tidyverse) #graphing, piping, csv reading
+library(ggforce) # paginated facet wraps
+library(caret) # model training
+library(arm) #centering, rescaling vars
+library(corrplot) #plotting correlation
+
+```
+
+
+
+```{r import-set-quality}
+
+# Import test and training files
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+
+# Combine data for cleaning/exploration
+test_labels <- test$Id
+test$SalePrice <- NA
+combined <- rbind(train, test)
+
+```
+
+# Data Cleaning
+I started off by filling in missing values in both the training and test sets. For variables which are physical features, such as whether a house has an Alley, I imputed a No Alley category, assuming they simply did not have the feature. 
+
+For descriptive fields of house features, such as the square footage of a basement, I entered a 0 when it appeared the feature did not exist. There were 81 observations, for example, which had the majority of the basement variables as NAs. 
+
+For other variables which every house should have, like the type of sale completed, I imputed the median for numeric variables or mode for categorical variables. There were a few variables I gave special treatment to - I imputed the year the house was built for the missing values which had a garage, but not a value for the  year the garage was built.
+
+There were a number of categorical variables which seemed to have an order, which I ordered as appropriate, such as “Gentle, Moderate, Severe” for the variable describing whether the land was sloped or flat. 
+
+I created a quality vector which I assign to each quality variables. I use these to create a quality super variable later on. 
+
+#### Quality Vector for new variable
+
+```{r quality_vectors}
+
+quality_null <- 3
+Qualities <- c("NA" = quality_null, 'None' = quality_null, 'Po' = 1, 'Fa' = 2, 'TA' = 7, 'Gd' = 13, 'Ex' = 21)
+Quality_vector <- c("NA", "Po", "Fa", "TA", "Gd", "Ex")
+
+```
+
+#### Exterior
+```{r clean-exteriors}
+
+# Re-factor
+combined <- combined %>% 
+  mutate(
+    ExterQual = ordered(ExterQual, levels=Quality_vector), 
+    ExterQual_num = as.integer(revalue(ExterQual, Qualities)),
+    ExterCond = ordered(ExterCond, levels=Quality_vector),
+    SaleType = factor(SaleType),
+    MSSubClass = factor(MSSubClass)
+  )
+
+# Impute NAs
+combined <- combined %>% 
+  mutate(
+    MasVnrArea = ifelse(is.na(MasVnrArea),0,MasVnrArea),
+    MasVnrType = fct_explicit_na(MasVnrType, na_level = "None"), #mode, also probably doesnt have brick
+    ExterQual_num = ifelse(is.na(ExterQual_num),quality_null,ExterQual_num),
+    ExterCond = ordered(ExterCond, levels=Quality_vector),
+    Exterior1st = fct_explicit_na(Exterior1st, na_level = "VinylSd"), #mode
+    Exterior2nd = fct_explicit_na(Exterior2nd, na_level = "VinylSd"), #mode
+    SaleType = fct_explicit_na(SaleType, na_level = "WD"), #mode
+)
+summary(combined$MasVnrArea)
+```
+
+#### Lot
+```{r clean-land}
+# Re-factor
+combined <- combined %>% 
+  mutate(
+    LotShape = ordered(LotShape, levels=c("Reg", "IR1", "IR2", "IR3")),
+    LandSlope = ordered(LandSlope, levels=c("Gtl", "Mod", "Sev")),
+  )
+
+# Impute NAs
+combined <- combined %>% 
+  mutate(
+    MSZoning = fct_explicit_na(factor(MSZoning), na_level = "RM"),
+    Alley = fct_explicit_na(factor(Alley), na_level = "No Alley"),
+    LotFrontage = ifelse(is.na(LotFrontage),0,LotFrontage),
+)
+
+
+```
+
+#### Comfort amenities
+```{r comfort-amenities}
+# Re-factor
+
+combined <- combined %>% 
+  mutate(
+    KitchenQual = ordered(KitchenQual, levels=Quality_vector),
+    KitchenQual_num = as.integer(revalue(KitchenQual, Qualities)),
+    FireplaceQu = ordered(FireplaceQu, levels=Quality_vector),
+    PoolQC = ordered(PoolQC,  levels=Quality_vector),
+
+)
+
+# Impute NAs
+combined <- combined %>% 
+  mutate(
+    KitchenQual = fct_explicit_na(KitchenQual, na_level = "TA"), # setting to mode
+    KitchenQual_num = ifelse(is.na(KitchenQual_num),quality_null,KitchenQual_num),
+    FireplaceQu = fct_explicit_na(FireplaceQu, na_level = "NA"),
+    MiscFeature = fct_explicit_na(MiscFeature, na_level = "NA"),
+    Fence = fct_explicit_na(factor(Fence), na_level = "NA"),
+    PoolQC = fct_explicit_na(PoolQC, na_level = "NA"),
+    Functional = fct_explicit_na(Functional, na_level = "Typ"), # setting to mode
+)
+
+```
+
+#### Basement
+```{r clean-basement}
+# Re-factor
+
+combined <- combined %>% 
+  mutate(
+    BsmtQual = ordered(BsmtQual, levels=Quality_vector), 
+    BsmtQual_num = as.integer(revalue(BsmtQual, Qualities)),
+    BsmtCond = ordered(BsmtCond,  levels=Quality_vector), 
+    BsmtExposure = ordered(BsmtExposure, levels=c("No", "Mn", "Av", "Gd")),
+    BsmtFinType1 = ordered(BsmtFinType1,  levels=c("Unf", "LwQ", "Rec", "BLQ", "ALQ", "GLQ")),
+    BsmtFinType2 = ordered(BsmtFinType2, levels=c("Unf", "LwQ", "Rec", "BLQ", "ALQ", "GLQ")),
+
+)
+
+# Impute NAs
+combined <- combined %>% 
+  mutate(
+    BsmtQual = fct_explicit_na(BsmtQual, na_level = "NA"),
+    BsmtQual_num = ifelse(is.na(BsmtQual_num),quality_null,BsmtQual_num),
+    BsmtCond = fct_explicit_na(BsmtCond, na_level = "NA"),
+    BsmtExposure = fct_explicit_na(BsmtExposure, na_level = "NA"),
+    BsmtFinType1 = fct_explicit_na(BsmtFinType1, na_level = "NA"),
+    BsmtFinType2 = fct_explicit_na(BsmtFinType1, na_level = "NA"),
+    BsmtUnfSF = ifelse(is.na(BsmtUnfSF),0,BsmtUnfSF),
+    TotalBsmtSF = ifelse(is.na(TotalBsmtSF),0,TotalBsmtSF),
+    BsmtFullBath = ifelse(is.na(BsmtFullBath),0,BsmtFullBath),
+    BsmtHalfBath = ifelse(is.na(BsmtHalfBath),0,BsmtHalfBath),
+    BsmtFinSF1 = ifelse(is.na(BsmtFinSF1),0,BsmtFinSF1),
+    BsmtFinSF2 = ifelse(is.na(BsmtFinSF2),0,BsmtFinSF2)
+  )
+
+
+
+
+```
+#### Utilities
+```{r clean-utilities}
+# Re-factor
+
+combined <- combined %>% 
+  mutate(
+    HeatingQC = ordered(HeatingQC, levels=Quality_vector),
+)
+
+# Impute NAs
+combined <- combined %>% 
+  mutate(
+    Electrical = fct_explicit_na(factor(Electrical), na_level = "NA"),
+    Utilities = fct_explicit_na(factor(Utilities), na_level = "AllPub"),
+)
+
+```
+
+#### Garage
+```{r clean-garage}
+# Re-factor
+
+combined <- combined %>% 
+  mutate(
+    GarageQual = ordered(GarageQual,  levels=Quality_vector),
+    GarageQual_num = as.integer(revalue(GarageQual, Qualities)),
+    GarageCond = ordered(GarageCond, levels=Quality_vector),
+    GarageFinish = ordered(GarageFinish, levels=c("Unf", "RFn", "Fin")),
+)
+
+# Impute NAs
+combined <- combined %>% 
+  mutate(
+    GarageQual = fct_explicit_na(GarageQual, na_level = "NA"),
+    GarageQual_num = ifelse(is.na(GarageQual_num),quality_null,GarageQual_num),
+    GarageCond = fct_explicit_na(GarageCond, na_level = "NA"),
+    GarageType = fct_explicit_na(GarageType, na_level = "NA"),
+    GarageFinish = fct_explicit_na(GarageFinish, na_level = "NA"),
+    GarageCars = ifelse(is.na(GarageCars),0,GarageCars),
+    GarageArea = ifelse(is.na(GarageArea),0,GarageArea),
+    GarageYrBlt = ifelse(is.na(GarageYrBlt), YearBuilt, GarageYrBlt),
+)
+
+```
+
+# Feature Engineering
+
+I created 9 variables where I thought additional value could be gained by combining existing variables. I describe each of these below.
+
+*Total Quality* - A numeric variable alternative to the overall quality variable provided. There are a series of quality variables, like fireplace quality or kitchen quality, which had an obvious order to them. For each of these variables, I created a new variable which I mapped to a numeric value given the scale listed in data cleaning.
+
+Notice poor and fair quality is weighted lower than if the house didn’t have the feature at all. On the opposite side of the spectrum, Excellent has a mis-proportionally higher weighting. I then used these series of numeric variables to create a new ‘Overall Quality’ variable, which I made by multiplying the following together: exterior quality, kitchen quality, basement quality, garage quality, and overall quality.  Having just a nice kitchen is not the same as also having a nice exterior, basement, and garage.
+
+*Total Squarefeet* - A numeric variable accounting for total square footage, from both the basement and above ground levels. 
+
+*Total Baths* - A numeric variable summing of the bath variables: full baths and half baths from the above ground levels and the basement levels. Half baths are counted as .5. 
+
+*Total Rooms* - A numeric variable summing all of the room variables: total rooms above ground, total baths, and total cars in the garage.
+
+*Room to Bath ratio* - A numeric variable dividing the number of bathrooms by the number of rooms. 
+
+*House age* - A numeric variable subtracting house’s year built from year of sale. 
+
+*Remodeled age* - A numeric variable subtracting the house’s last remodeled age from year of sale. 
+
+*Yard* - A numeric variable subtracting the square footage of the first floor from the total lot area.
+
+*Total porch area* - A numeric variable summing the square footage of all the different types of porches: wood porches, open porches, enclosed porches, 3-season porches, and screened porches.
+
+
+```{r feature-engineering}
+
+
+combined <- combined %>% 
+  mutate(
+    total_baths = (FullBath + BsmtFullBath + HalfBath*.5 + BsmtHalfBath*.5), # Add all baths togehter
+    total_rooms = total_baths + GarageCars + TotRmsAbvGrd, # Add all rooms togeather
+    room_bath_ratio = total_baths/total_rooms, # ration of bathrooms to bedrooms
+    house_age = YrSold - YearBuilt, # a b
+    remodeled = ifelse(YearBuilt==YearRemodAdd,0,1),
+    isNew = ifelse(YrSold==YearBuilt,1,0),
+    yard = LotArea - X1stFlrSF,
+    total_sf = TotalBsmtSF + GrLivArea, 
+    total_quality = ExterQual_num * KitchenQual_num * BsmtQual_num * OverallQual * GarageQual_num,
+    total_porch_area = WoodDeckSF + OpenPorchSF + EnclosedPorch + X3SsnPorch + ScreenPorch,
+  )
+
+
+```
+
+# Further EDA
+
+A quick correlation plot of all of the numeric variables showed Overall Quality had a .79 correlation with SalePrice. The next more important variables were above grade living square footage and number of cars the garage had. I made note of these for creating new variables. I saw some colinearity between a few variables - the square footage of the garage and the number of cars a garage could hold was a strong example. Another one is the year the house was built and the year the garage was built.  
+
+Additionally, I plotted all the numeric variables in bivariate plots against SalePrice to check for linearity. Six variables demonstrated a non-linear relationship. I discuss these below. 
+
+Of the categorical variables, neighborhoods had one of the highest variances when plotted against Sales Price. I use this later for interactions during model training. 
+
+### Neighborhoods are a good variable to play with
+```{r eda-1}
+
+neigh_summary <- combined %>% 
+  filter(!is.na(SalePrice)) %>% 
+  group_by(Neighborhood) %>% 
+  summarize(
+    mean = mean(SalePrice),
+    q25 = quantile(SalePrice, .25),
+    q50 = median(SalePrice),
+    q75 = quantile(SalePrice, .75),
+    sd = sd(SalePrice)
+  ) %>% 
+  arrange(desc(q50))
+
+combined %>% 
+  filter(!is.na(SalePrice)) %>% 
+  group_by(Neighborhood) %>% 
+  ggplot(aes(reorder(Neighborhood, SalePrice), SalePrice)) + 
+  geom_boxplot() + 
+  scale_y_continuous(labels = dollar) + 
+  ggtitle("Neighborhood ~ Sale Price") + 
+  xlab("Neighborhood") + 
+  coord_flip()
+
+
+combined %>% 
+  filter(!is.na(SalePrice)) %>% 
+  group_by(Neighborhood, OverallQual) %>% 
+  ggplot(aes(OverallQual, reorder(Neighborhood, OverallQual))) + 
+  geom_jitter()
+ 
+
+```
+
+
+
+
+#### Quality and square footage have high correlation
+``` {r corre-plot}
+# Create pairwise corr object
+vars_numeric <- which(sapply(combined, is.numeric))
+vars_factor <- which(sapply(combined, is.factor))
+all_nums <- combined[, vars_numeric]
+all_nums <- all_nums %>% 
+  filter(SalePrice != 0)
+corr_num <- cor(all_nums, use="pairwise.complete.obs") 
+
+# sort by correlation with sales price and plot
+cor_sorted <- as.matrix(sort(corr_num[,'SalePrice'], decreasing = TRUE))
+cor_high <- names(which(apply(cor_sorted, 1, function(x) abs(x)>.5)))
+corr_num <- corr_num[cor_high, cor_high]
+
+corrplot.mixed(corr_num, tl.col="black", tl.pos="lt", tl.cex = .8, cl.cex = .8, pch.cex = 1,  addCoefasPercent=TRUE)
+corr_num
+corre <- colnames(corr_num)
+```
+
+
+#### No difference in year sold
+
+```{r year-sold}
+
+all_nums %>% 
+  gather(-SalePrice,-Id, key="var", value="value") %>% 
+  ggplot(aes(x=value, y=SalePrice)) + 
+  geom_point() +
+  scale_y_continuous(labels=dollar) + 
+  facet_wrap_paginate(~ var, scales = "free", nrow=4, ncol=4, page=4) 
+  # geom_text(mapping = aes(label=Id))
+
+
+```
+
+#### Bivariate plots show a number of numeric variables which could benefit from being logged
+```{r facet-wrap-plots}
+
+# loop through all numeric vars and create bivariate plot agsisnt sale price
+for(i in 1:ncol(all_nums)) {
+  if(is.numeric(all_nums[,i])) {
+    plot(all_nums[,i],all_nums$SalePrice, main=names(all_nums)[i])
+  }
+}
+
+
+```
+
+
+
+### Getting to know building type and neighborhood a bit better...
+
+```{r eda-2}
+
+
+train_v0 <- combined %>% 
+  filter(!is.na(SalePrice))
+
+ggplot(train_v0, aes(BldgType, log(SalePrice))) + 
+  geom_boxplot()+
+  scale_y_continuous(labels=dollar) + 
+  ggtitle("BldgType ~ log of SalePrice")
+
+train_v0 %>% 
+  filter(BldgType != "1Fam", BldgType != "TwnhsE") %>% 
+  group_by(Neighborhood) %>% 
+  ggplot(aes(Neighborhood, SalePrice, color=BldgType)) +
+  geom_jitter() + 
+  scale_y_continuous(labels=dollar) + 
+  coord_flip() 
+
+train_v0 %>% 
+  filter(BldgType == "1Fam") %>% 
+  group_by(Neighborhood) %>% 
+  ggplot(aes(Neighborhood, SalePrice, color=OverallQual)) +
+  geom_jitter() + 
+  scale_y_continuous(labels=dollar) + 
+  coord_flip()
+
+train_v0 %>% 
+  filter(BldgType == "1Fam") %>% 
+  group_by(Neighborhood) %>% 
+  ggplot(aes(Neighborhood, SalePrice, color=HouseStyle)) +
+  geom_jitter() + 
+  scale_y_continuous(labels=dollar) + 
+  coord_flip()
+
+ggplot(train_v0, aes(Neighborhood, total_sf, color=log(SalePrice))) + 
+  geom_boxplot()+
+  scale_y_continuous(labels=dollar)
+
+
+ggplot(train_v0, aes(total_sf)) + 
+    geom_histogram(color='white', alpha=0.6, fill='steelblue') +
+    labs(title='Distribution of total SF', y='')
+
+
+ggplot(train_v0, aes(total_quality)) + 
+    geom_histogram(color='white', alpha=0.6, fill='steelblue') +
+    labs(title='Distribution of quality score', y='')
+
+train_v0 %>% 
+  ggplot(aes(total_quality, SalePrice, color=Neighborhood)) +
+  geom_jitter() + 
+  scale_y_continuous(labels=dollar) + 
+  ggtitle("Total quality 1-5 ~ Sale Price")
+
+
+ggplot(train_v0, aes(total_baths)) + 
+    geom_histogram(color='white', alpha=0.6, fill='steelblue') +
+    labs(title='Distribution of total baths', y='')
+
+
+
+```
+
+
+# Statistical Model
+I removed 4 outliers which had a low sale price with a very high square footage, as square footage was one of the more strongly correlated variables. 
+
+I choose to use all of the variables available, since removing ones which appeared to have collinearity increased out of sample RMSE. I took the log of a few input variables which demonstrated a nonlinear relationship  in a bivariate plot against the sale price: above grade square footage, the area of the lot, linear feet of street connected to the property, the area of masonry veneer, the garage area, the total square footage of the basement, and the square footage of wooden decks. 
+
+I one hot encoded all variables into a dummy matrix and removed near zero variance variables from the training set. In addition to all of the predictors mentioned, I one hot encoded three interactions: total square footage by neighborhood, total rooms by neighborhood, and total quality by type of house.  
+Additionally, I centered and scaled all variables, as is required for the glmnet regression technique I choose.
+
+### Regression Model
+In total, I trained on 1458 samples with 165 predictors. Comparing out of sample RMSE, a log model using glmnet regression performed the best at producing a model estimating Sale Price. The tuned model uses an alpha value of .383 and a lambda value of .008 when setting the seed to 123. 
+
+
+```{r model-l4-all, paged.print=TRUE}
+
+# create dummy matrix with interactions and logged vars 
+numeric_l4 <- combined  
+dv_l4 <- dummyVars( ~ total_sf * Neighborhood + total_rooms * Neighborhood + total_quality * MSSubClass   + 
+                      log(GrLivArea + 1) +
+                      log(LotArea + 1) +
+                      log(LotFrontage + 1) +
+                      log(MasVnrArea + 1) +
+                      log(TotalBsmtSF + 1) +
+                      log(WoodDeckSF + 1) +
+                      ., numeric_l4, fullRank=TRUE)
+numeric_l4 <- data.frame(predict(dv_l4, newdata=numeric_l4))
+
+# filter outliers and separate test and train set
+extended_l4 <- numeric_l4 %>%
+  filter(
+    !is.na(SalePrice), 
+    Id != c(186, 497, 1299, 524), # Cooks distance over 1
+    ) %>%
+  dplyr::select(-Id)
+
+train_l4 <- extended_l4 [, -nzv(extended_l4)]
+
+test_l4 <- numeric_l4 %>%
+  filter(is.na(SalePrice))
+
+# train model
+set.seed(123)
+model_l4 <- train(
+  log(SalePrice) ~ ., 
+  data=train_l4, 
+  preProcess=c("center", "scale"), 
+  method="glmnet",
+    tuneGrid = expand.grid(
+    alpha = .23, #seq(.18, .23, .001),
+    lambda = .012 #seq(.01, .02, .001)
+              )
+)
+
+
+# find in-sample statistics
+trainRSME_l4 <- train_l4 %>%
+  dplyr::select(SalePrice) %>%
+  mutate(
+    Est_SalePrice = exp(predict(model_l4, newdata = train_l4)),
+    priceDiff = SalePrice - Est_SalePrice,
+  )
+
+trainRSME_l4 <- trainRSME_l4 %>%
+  summarize(
+    MAE = MAE(SalePrice, Est_SalePrice),
+    RMSE = RMSE(SalePrice, Est_SalePrice),
+    R2 = R2(SalePrice, Est_SalePrice)
+  )
+
+trainRSME_l4
+
+# see model results
+plot(model_l4$finalModel)
+(model_l4$results)
+coef(model_l4, s="lambda.min")
+# plot(model_l4)
+model_l4
+
+
+```
+
+### Create submission file
+```{r file_output}
+submit_l4 <- test_l4 %>%
+  dplyr::select(Id) %>%
+  mutate(SalePrice = exp(predict(model_l4, newdata = test_l4)))
+write_csv(submit_l4, 'submission.csv')
+
+```
+
+### Variables Importance
+The final model favored quality and square footage related variables.
+
+```{r variable_importance}
+
+# make a ordered graph, filtered to the highest coefficients
+compare <- data.frame(variables = c("(Intercept)",model_l4$coefnames ))
+compare$coefs <- c(as.numeric(as.character(coef(model_l4$finalModel, model_l4$bestTune$lambda))))
+compare <- compare %>% filter(variables!="(Intercept)")
+# Plot variables with highest coefficients
+compare %>% 
+  filter(abs(coefs)>.005) %>% 
+  ggplot(aes(reorder(variables, coefs), coefs)) +
+  geom_bar(stat = "identity",position="dodge") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title="Variables with Coefficients over .005", x="Variable", y="Coefficient Value")
+
+
+```
+
+```
